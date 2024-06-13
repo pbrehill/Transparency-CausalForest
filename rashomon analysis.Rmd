@@ -1,0 +1,365 @@
+---
+title: Analysis for Transparency challenges in policy evaluation with causal machine
+  learning – improving usability and accountability
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+# Set up data from clean env
+rm(list = ls())
+source("data_setup.R")
+rm(list = ls())
+
+# Load neccessary libraries
+library(tidyverse)
+library(grf)
+library(ggforce)
+library(fastDummies)
+source("distilled_causal_tree.R")
+```
+
+```{r}
+data_full <- readRDS('data.rds')
+set.seed(30)
+```
+
+```{r}
+W <- data_full$W
+X <- data_full$X
+Y <- data_full$Y
+weights <- data_full$weights
+w_hat <- data_full$What
+y_hat <- data_full$Yhat
+X_id <- data_full$Xid
+orth_labels <- data_full$orth_labels
+```
+
+```{r}
+
+# 10000 tree causal forest for benchmark
+t100000 <- causal_forest(X, 
+                         Y, 
+                         W,
+                         Y.hat = NULL,
+                         W.hat = NULL,
+                         sample.weights = weights,
+                         num.trees = 50000,
+                         seed = 1000)
+
+# 10000 tree causal forest for benchmark
+t10000 <- causal_forest(X, 
+                         Y, 
+                         W,
+                         Y.hat = t100000$Y.hat,
+                         W.hat = t100000$W.hat,
+                         sample.weights = weights,
+                         num.trees = 10000,
+                         seed = 1000)
+
+# 1000 tree causal forest
+t1000 <- causal_forest(X, 
+                         Y, 
+                         W,
+                         Y.hat = t100000$Y.hat,
+                         W.hat = t100000$W.hat,
+                         sample.weights = weights,
+                         num.trees = 1000,
+                         seed = 1000)
+
+# 100 tree causal forest
+t100 <- causal_forest(X, 
+                         Y, 
+                         W,
+                         Y.hat = t100000$Y.hat,
+                         W.hat = t100000$W.hat,
+                         sample.weights = weights,
+                         num.trees = 100,
+                         seed = 1000)
+
+# 10 tree causal forest
+t10 <- causal_forest(X, 
+                         Y, 
+                         W,
+                         Y.hat = t100000$Y.hat,
+                         W.hat = t100000$W.hat,
+                         sample.weights = weights,
+                         num.trees = 10,
+                         seed = 1000)
+
+# 2 tree causal forest
+t1 <- causal_forest(X, 
+                         Y, 
+                         W,
+                         Y.hat = t100000$Y.hat,
+                         W.hat = t100000$W.hat,
+                         sample.weights = weights,
+                         num.trees = 1,
+                        ci.group.size = 1,
+                         seed = 1000)
+
+
+# # Causal tree with unlimited depth
+# t1 <- causal_forest(t10000 %>% get_tree(70), 
+#                          y_hat, 
+#                          w_hat,
+#                          sample.weights = data_s$uhhwte)
+# 
+# # Causal tree with minsize = 50
+# t1_lim <- causal_forest(X, 
+#                          Y %>% missMethods::impute_median() %>% pull(), 
+#                          W %>% missMethods::impute_median() %>% pull,
+#                          Y.hat = y_hat,
+#                          W.hat = w_hat,
+#                          sample.weights = data_s$uhhwte,
+#                          num.trees = 10000)
+
+t100000 %>% write_rds("100000_forest.rds")
+t10000 %>% write_rds("10000_forest.rds")
+t1000 %>% write_rds("1000_forest.rds")
+t100 %>% write_rds("100_forest.rds")
+t10 %>% write_rds("10_forest.rds")
+t1 %>% write_rds("1_forest.rds")
+
+```
+
+```{r}
+t100000 <- read_rds("100000_forest.rds")
+t10000 <- read_rds("10000_forest.rds")
+t1000 <- read_rds("1000_forest.rds")
+t100 <- read_rds("100_forest.rds")
+t10 <- read_rds("10_forest.rds")
+t1 <- read_rds("1_forest.rds")
+```
+
+
+```{r}
+distilled_model <- distilled_causal_tree(t100000, seed = 3, num_candidate_trees = 1, replicates = 2000, maxdepth = 3)
+```
+
+```{r}
+rloss <- function(Y, W, m_star, e_star, tau_x) {
+  r_losses <- ((Y - m_star) - ((W - e_star) * tau_x))^2
+  mean(r_losses, na.rm = T)
+}
+
+replace_outliers_with_NA <- function(x) {
+  # Calculate the 2.5th and 97.5th percentiles
+  lower_bound <- quantile(x, 0, na.rm = T)
+  upper_bound <- quantile(x, 0.975, na.rm = T)
+  
+  # Replace values outside the bounds with NA
+  x[x < lower_bound | x > upper_bound] <- NA
+  return(x)
+}
+```
+
+
+```{r}
+losses <- data.frame(
+  t10000 = (t100000$prediction - t10000$predictions) / t100000$prediction,
+  t1000 = (t100000$prediction - t1000$predictions) / t100000$prediction,
+  t100 = (t100000$prediction - t100$predictions) / t100000$prediction,
+  t10 = (t100000$prediction - t10$predictions) / t100000$prediction,
+  t1 = (t100000$prediction - t1$predictions) / t100000$prediction,
+  Distilled = (t100000$prediction - predict(distilled_model$model, X)) / t100000$prediction
+)
+
+r_losses <- data.frame(
+  t50000 = rloss(Y, W, y_hat, w_hat, t100000$predictions),
+  t10000 = rloss(Y, W, y_hat, w_hat, t10000$predictions),
+  t1000 = rloss(Y, W, y_hat, w_hat, t1000$predictions),
+  t100 = rloss(Y, W, y_hat, w_hat, t100$predictions),
+  t10 = rloss(Y, W, y_hat, w_hat, t10$predictions),
+  t1 = rloss(Y, W, y_hat, w_hat, t1$predictions),
+  Distilled = rloss(Y, W, y_hat, w_hat, predict(distilled_model$model, X))
+)
+```
+
+```{r}
+r_losses <- r_losses - r_losses[1,1]
+r_losses %>% t() %>% as.data.frame() %>% rownames_to_column("Learner") %>% stargazer::stargazer(summary = FALSE)
+```
+
+
+```{r}
+losses <- map_df(losses, replace_outliers_with_NA)
+
+losses %>%
+  mutate_all(abs) %>%
+  gather("Number of trees", "Absolute loss") %>%
+  mutate(`Number of trees` = factor(`Number of trees`,
+                                    levels = c("Distilled", "t1", "t10", "t100", "t1000", "t10000"),
+                                    labels = c("Distilled", "1", "10", "100", "1000", "10000"))) %>%
+  ggplot(aes(x = `Number of trees`, y = `Absolute loss`)) +
+    geom_jitter(alpha = 0.1) +
+    stat_summary(fun=mean, geom="line", aes(group=1), color ="red", size=2) +
+    stat_summary(fun=mean, geom="point", aes(group=1), color ="red", size=3) +
+    scale_y_continuous(limits = c(0,5))
+
+ggsave('loss_graph.png')
+```
+
+
+# Variable importance
+
+```{r Variable importance}
+varimp <- data.frame(
+  names = names(t100000$X.orig),
+  importance = variable_importance(t100000)
+) %>% arrange(desc(importance)) %>% as.tibble() %>% 
+  mutate(
+    cumsum = cumsum(importance)
+    )%>%
+  left_join(
+    orth_labels, by = "names"
+  )
+
+varimp %>%
+  select(labels, importance, cumsum) %>%
+  mutate(
+    importance = format(round(importance, 3), nsmall = 3),
+    cumsum = format(round(cumsum, 3), nsmall = 3)
+  ) %>%
+  stargazer::stargazer(summary = FALSE) %>%
+  clipr::write_clip()
+```
+
+# Best linear projection
+
+```{r}
+varimp_blp <- varimp %>%
+  filter(cumsum < 0.5)
+```
+
+```{r}
+# WARNING - I have hardcoded handling of variables here!
+A <- X %>% select(uhgdob, ufmfo6s, ufmmo6s, ufmmo6s, uancob) %>%
+  mutate(across(.cols = -uhgdob, .fns = ~ifelse(. < 0, NA, .)))
+
+A <- dummy_cols(A, select_columns = "uancob", remove_selected_columns = TRUE, remove_most_frequent_dummy = T) %>%
+  select(where(~ sum(.) > 50))
+A <- mutate_all(A, as.numeric)
+```
+
+```{r}
+blp <- best_linear_projection(t100000, A)
+blp
+```
+
+```{r}
+stargazer::stargazer(blp) %>% clipr::write_clip()
+```
+
+
+# Get ate
+
+```{r}
+average_treatment_effect(t100000)
+```
+
+# Refutation tests
+
+```{r Refutation tests}
+# Placebo
+placebo_w <- W[sample.int(length(W))]
+
+placebo_cf <- causal_forest(X, 
+                            Y, 
+                            placebo_w,
+                            sample.weights = weights,
+                            num.trees = 10000,
+                            seed = 1000)
+
+average_treatment_effect(placebo_cf)
+
+# Random income
+placebo_y <- Y[sample.int(length(Y))]
+
+randy_cf <- causal_forest(X, 
+                          placebo_y,
+                          W,
+                          sample.weights = weights,
+                          num.trees = 10000,
+                          seed = 1000)
+
+
+
+average_treatment_effect(randy_cf)
+
+
+# Refutation graphs
+graph_data <- data.frame(scores_w = get_scores(placebo_cf), 
+                         treat = W, 
+                         pred_w = placebo_cf$predictions,
+                         scores_y = get_scores(randy_cf),
+                         income = Y,
+                         pred_y = randy_cf$predictions,
+                         rand_y = placebo_y,
+                         rand_w = placebo_w,
+                         w_hat = placebo_cf$W.hat,
+                         y_hat = placebo_cf$Y.hat
+                         )
+
+ggplot(data = graph_data, aes(x = income, y = pred_y)) +
+  geom_jitter(alpha = 0.2) +
+  geom_smooth(aes(y = scores_y), se = FALSE, color ="red") +
+  labs(x = "Actual income", y = "Predicted treatment effects") +
+  scale_x_continuous(limits = c(0,3e+05)) +
+  scale_y_continuous(limits = c(-10000, 10000)) +
+  geom_hline(yintercept = 0, color = "blue", linetype = "dashed") +
+  theme_minimal()
+
+ggsave("figures/fig7a.png")
+
+ggplot(data = graph_data, 
+       aes(x = treat, y = pred_y)) +
+  geom_jitter(alpha = 0.2) +
+  stat_summary(aes(y=scores_y), fun=mean, geom="point", color ="red", size=3.5) +
+  labs(x = "Actual treatment", y = "Predicted treatment effects") +
+  scale_y_continuous(limits = c(-10000, 10000)) +
+  geom_hline(yintercept = 0, color = "blue", linetype = "dashed") +
+  theme_minimal()
+
+ggsave("figures/fig7b.png")
+
+ggplot(data = graph_data, aes(x = income, y = pred_w)) +
+  geom_jitter(alpha = 0.2) +
+  geom_smooth(aes(y = scores_w), se = FALSE, color ="red") +
+  labs(x = "Actual income", y = "Predicted treatment effects") +
+  scale_x_continuous(limits = c(0,3e+05)) +
+  scale_y_continuous(limits = c(-10000, 10000)) +
+  geom_hline(yintercept = 0, color = "blue", linetype = "dashed") +
+  theme_minimal()
+
+ggsave("figures/fig7c.png")
+
+ggplot(data = graph_data, 
+       aes(x = treat, y = pred_w)) +
+  geom_jitter(alpha = 0.2) +
+  stat_summary(aes(y=scores_w), fun=mean, geom="point", color ="red", size=3.5) +
+  labs(x = "Actual treatment", y = "Predicted treatment effects") +
+  scale_y_continuous(limits = c(-10000, 10000)) +
+  geom_hline(yintercept = 0, color = "blue", linetype = "dashed") +
+  theme_minimal()
+
+ggsave("figures/fig7d.png")
+```
+
+# Propensity score overlap check
+
+```{r}
+data.frame(
+  Treatment = t100000$W.orig %>% factor(labels = c("High school", "Bachelors")),
+  W_hat = t100000$W.hat
+) %>%
+  ggplot(aes(x = W_hat, fill = Treatment)) +
+    geom_density(alpha = 0.5) +
+    theme_minimal() +
+    labs(x = "Propensity score", y = "Density")
+
+ggsave("figures/psdist.png")
+```
+
+
